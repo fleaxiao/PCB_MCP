@@ -13,13 +13,13 @@ from pcb_tool_check import *
 
 mcp = FastMCP("PCB", log_level="ERROR")
 
-@mcp.resource("pcb://dataset/{file_path}")
-async def get_dataset_info(file_path: str) -> list:
+@mcp.tool()
+async def get_dataset_info(file_path: str) -> str:
     """
     Scrape the dataset webpage to extract textual and tabular information about IC description, pin function and layout guidance.
 
     Args:
-        file_path (str): Path to the dataset webpage.
+        file_path (str): Path to the PCB file.
     """
 
     board = pcbnew.LoadBoard(file_path)
@@ -82,57 +82,100 @@ async def get_pcb_image(file_path: str) -> str:
         file_path (str): Path to the PCB file.
     """
 
-    board = pcbnew.LoadBoard(file_path)
-    if not board:
-        print(f"Error: Could not load PCB from {file_path}")
-        return "Error: Could not load PCB"
-
-    msg = await save_pcb_image(file_path, board)
+    msg = await save_pcb_image(file_path)
     print(msg)
 
     return msg
 
 @mcp.tool()
-async def set_board(file_path: str) -> str:
+async def init_pcb(file_path: str) -> str:
     """
-    Adjust the board size in the Edge.Cuts layer according to the current effective area.
+    Initialize the modules to ensure the center of the courtyard is at the origin of each footprint. This is a prerequisite for subsequent operations.
     
     Args:
-        path (str): Path to the PCB file.
+        file_path (str): Path to the PCB file.
     """
 
-    board = pcbnew.LoadBoard(file_path)
-
-    if not board:
-        print(f"Error: Could not load board from {file_path}")
-        return "Error: Could not load board"
-
-    msg =  await set_board_cut(file_path, board)
-    msg += "\n" + await set_board_GND(file_path, board)
+    msg = await init_module(file_path)
     print(msg)
 
     return msg
 
 @mcp.tool()
-async def adjust_module(file_path: str, module_ref: str, pos_x: Optional[float] = None, pos_y: Optional[float] = None, angle: Optional[float] = None) -> str:
+async def label_area(file_path: str, func: str, center_x: float, center_y: float, size_x: float, size_y: float) -> str:
     """
-    Adjust the position and angle of a module in a PCB file.
+    Label a rectangular area by its function on a specific user layer.
+
+    Args:
+        path (str): Path to the PCB file.
+        func (str): Function name of the area to label.
+        center_x (float): Center X of the area in mm.
+        center_y (float): Center Y of the area in mm.
+        size_x (float): Width of the area in mm.
+        size_y (float): Height of the area in mm.
+    """
+
+    # msg = await label_shape_by_layer(file_path, func, center_x, center_y, size_x, size_y)
+    msg = await label_zone_by_name(file_path, func, center_x, center_y, size_x, size_y)
+    print(msg)
+
+    return msg
+
+@mcp.tool()
+async def adjust_module_position(file_path: str, module_ref: str, pos_x: Optional[float] = None, pos_y: Optional[float] = None) -> str:
+    """
+    Adjust the position and angle of one module.
 
     Args:
         path (str): Path to the PCB file.
         module_ref (str): Reference of the module to modify.
         pos_x (Optional[float]): New X position in mm. If None, keeps current position.
         pos_y (Optional[float]): New Y position in mm. If None, keeps current position.
+    """
+
+    board = pcbnew.LoadBoard(file_path)
+    if not board:
+        print(f"Error: Could not load PCB from {file_path}")
+        return "Error: Could not load PCB"
+
+    msg_functions = [set_module_position, check_module_statue]
+    msg = ""
+    for func in msg_functions:
+        try:
+            result = await func(file_path, board, module_ref, pos_x, pos_y)
+            msg += result
+        except Exception as e:
+            error_msg = f"Error: {str(e)}\n"
+            return error_msg
+    print(msg)
+
+    return msg
+
+@mcp.tool()
+async def adjust_module_angle(file_path: str, module_ref: str, angle: Optional[float] = None) -> str:
+    """
+    Adjust the position and angle of one module.
+
+    Args:
+        path (str): Path to the PCB file.
+        module_ref (str): Reference of the module to modify.
         angle (Optional[float]): New angle in degrees. If None, keeps current angle.
     """
 
     board = pcbnew.LoadBoard(file_path)
-
     if not board:
-        print(f"Error: Could not load board from {file_path}")
-        return "Error: Could not load board"
-    
-    msg = await set_module_position_angle(file_path, board, module_ref, pos_x, pos_y, angle)
+        print(f"Error: Could not load PCB from {file_path}")
+        return "Error: Could not load PCB"
+
+    msg_functions = [set_module_angle]
+    msg = ""
+    for func in msg_functions:
+        try:
+            result = await func(file_path, board, module_ref, angle)
+            msg += result
+        except Exception as e:
+            error_msg = f"Error: {str(e)}\n"
+            return error_msg
     print(msg)
 
     return msg
@@ -155,26 +198,16 @@ async def adjust_module(file_path: str, module_ref: str, pos_x: Optional[float] 
 #     return msg
 
 @mcp.tool()
-async def label_area(file_path: str, func: str, center_x: float, center_y: float, size_x: float, size_y: float) -> str:
+async def set_board(file_path: str) -> str:
     """
-    Label a rectangular area by its function on a specific user layer.
-
+    When finishing the module placement, adjust the board size in the Edge.Cuts layer according to the current effective area. Add copper zone for GND net on B.Cu layer
+    
     Args:
         path (str): Path to the PCB file.
-        func (str): Function name of the area to label.
-        center_x (float): Center X of the area in mm.
-        center_y (float): Center Y of the area in mm.
-        size_x (float): Width of the area in mm.
-        size_y (float): Height of the area in mm.
     """
 
-    board = pcbnew.LoadBoard(file_path)
-
-    if not board:
-        print(f"Error: Could not load board from {file_path}")
-        return "Error: Could not load board"
-
-    msg = await label_area_by_layer(file_path, board, func, center_x, center_y, size_x, size_y)
+    msg =  await set_board_cut(file_path)
+    msg += "\n" + await set_board_GND(file_path)
     print(msg)
 
     return msg
@@ -215,11 +248,11 @@ async def check_design_rule(file_path: str, min_clearance: Optional[float] = Non
         print(f"Error: Could not load board from {file_path}")
         return "Error: Could not load board"
 
-    check_functions = [check_onboard_violations, check_clearance_violations]
+    check_functions = [check_board_onboard_violations, check_board_clearance_violations]
     check_results = []
     for func in check_functions:
         try:
-            if func == check_clearance_violations:
+            if func == check_board_clearance_violations:
                 result = await func(board, min_clearance)
             else:
                 result = await func(board)
@@ -263,11 +296,12 @@ Clearance Violations: {len(clearance_violations)}
 if __name__ == "__main__":
     # mcp.run(transport="stdio")
 
-    file_path = r"C:\Users\20234635\OneDrive - TU Eindhoven\Desktop\Code\pcb_mcp\test_board\test.kicad_pcb"
-    # module_ref = "C1"
-    # pos_x = 50.0
-    # pos_y = 5.0
-    # angle = 180
+    file_path = r"test_board\test.kicad_pcb"
+    module_ref = "L1"
+    pos_x = 55.0
+    pos_y = 40
+    angle = 90
+    # asyncio.run(adjust_module_position(file_path, module_ref))
 
     # center_x = 75.0
     # center_y = 50.0
@@ -275,7 +309,7 @@ if __name__ == "__main__":
     # size_y = 20.0
 
     asyncio.run(get_pcb_info(file_path))
-    # asyncio.run(adjust_module(file_path, module_ref, pos_x, pos_y, angle))
-    # asyncio.run(label_area(file_path, "VOUT", center_x, center_y, size_x, size_y))
+    # asyncio.run(init_pcb(file_path))
+    # asyncio.run(label_area(file_path, "myVOUT", center_x, center_y, size_x, size_y))
     # asyncio.run(check_design_rule(file_path))
     # asyncio.run(set_board(file_path))

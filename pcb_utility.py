@@ -16,9 +16,7 @@ async def get_footprint_courtyard(module):
 
     return courtyard_bbox
 
-
 async def get_footprint_size(module):
-
     courtyard_bbox = await get_footprint_courtyard(module)
 
     if courtyard_bbox is not None:
@@ -33,7 +31,6 @@ async def get_footprint_size(module):
         return None, None
 
 async def get_board_courtyard(board):
-
     courtyard_bbox = None
 
     for graphic in board.GetDrawings():
@@ -52,6 +49,7 @@ async def get_board_size(board):
 
     w = pcbnew.ToMM(bbox.GetWidth())
     h = pcbnew.ToMM(bbox.GetHeight())
+
     return w, h
 
 
@@ -78,3 +76,34 @@ async def extract_table(table):
                 data['rows'].append(row_data)
     
     return data if (data['headers'] or data['rows']) else None
+
+async def check_segments_intersect(segments):
+
+    def ccw(ax, ay, bx, by, cx, cy):
+        return (cy - ay) * (bx - ax) > (by - ay) * (cx - ax)
+    
+    def check_two_segments(x1, y1, x2, y2, x3, y3, x4, y4):
+        return (ccw(x1, y1, x3, y3, x4, y4) != ccw(x2, y2, x3, y3, x4, y4) and
+                ccw(x1, y1, x2, y2, x3, y3) != ccw(x1, y1, x2, y2, x4, y4))
+    
+    n = len(segments)
+    intersecting_pairs = []
+    
+    if n < 2:
+        return intersecting_pairs
+    
+    for i in range(n):
+        for j in range(i + 1, n):
+            seg1 = segments[i]
+            seg2 = segments[j]
+            
+            if seg1[4] == seg2[4]:
+                continue
+            
+            x1, y1, x2, y2 = seg1[0], seg1[1], seg1[2], seg1[3]
+            x3, y3, x4, y4 = seg2[0], seg2[1], seg2[2], seg2[3]
+            
+            if check_two_segments(x1, y1, x2, y2, x3, y3, x4, y4):
+                intersecting_pairs.append((i, j, seg1[4], seg2[4]))
+    
+    return intersecting_pairs

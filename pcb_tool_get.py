@@ -3,22 +3,21 @@ import pcbnew
 import xml.etree.ElementTree as ET
 
 from logging import root
+from typing import Optional
 from pcb_utility import *
 
 
 async def ana_board_info(board: pcbnew.BOARD) -> str:
     try:
         board_courtyard = await get_board_courtyard(board)
-        
         if not board_courtyard:
-            return "Error: Could not compute board courtyard"
-        
-        board_courtyard_x, board_courtyard_y = pcbnew.ToMM(board_courtyard.GetWidth()), pcbnew.ToMM(board_courtyard.GetHeight())
+            courtyard_info = "The board courtyard has not been defined."
+        else:
+            courtyard_info = f"Size: {pcbnew.ToMM(board_courtyard.GetWidth()):.2f} mm x {pcbnew.ToMM(board_courtyard.GetHeight()):.2f} mm"
 
         bounding_box = board.ComputeBoundingBox()
         if not bounding_box:
             return "Error: Could not compute bounding box"
-        
         BoundingBox_center = bounding_box.GetCenter()
         BoundingBox_size = bounding_box.GetSize()
         center_x, center_y = pcbnew.ToMM(BoundingBox_center.x), pcbnew.ToMM(BoundingBox_center.y)
@@ -30,12 +29,12 @@ async def ana_board_info(board: pcbnew.BOARD) -> str:
         num_vias = len([via for via in board.GetTracks() if isinstance(via, pcbnew.PCB_VIA)])
 
         board_info = f"""Board Information:
+Board Courtyard - {courtyard_info}
 Bounding Box - Center: ({center_x:.2f} mm, {center_y:.2f} mm), Size: {width:.2f} mm x {height:.2f} mm
-Board Courtyard - Center: ({board_courtyard_x:.2f} mm, {board_courtyard_y:.2f} mm), Size: {board_courtyard_x:.2f} mm x {board_courtyard_y:.2f} mm
-Modules - Number: {num_modules}
-Nets - Number: {num_nets}
-Tracks - Number: {num_tracks}
-Vias - Number: {num_vias}
+Module - Number: {num_modules}
+Net - Number: {num_nets}
+Track - Number: {num_tracks}
+Via - Number: {num_vias}
 """
         return board_info
     
@@ -66,12 +65,12 @@ async def ana_module_info(board: pcbnew.BOARD) -> str:
                     pad_info.append(f"{pad_num}({pad_net})")
             
             pad_nets = ", ".join(pad_info) if pad_info else "No pads"
-            module_info_i = f"Module - Ref: {module_ref_i}, Position: ({module_pos_x_i:.2f} mm, {module_pos_y_i:.2f} mm), Angle: {module_angle_i}, Footprint: {footprint_name_i}, Size: {footprint_w_i:.2f} mm x {footprint_h_i:.2f} mm, Pads: {pad_nets}\n"
+            module_info_i = f"Module - Ref: {module_ref_i}, Footprint: {footprint_name_i}, Size: {footprint_w_i:.2f} mm x {footprint_h_i:.2f} mm, Pads: {pad_nets}\n"
 
             module_info.append((module_ref_i, module_info_i))
 
         if not module_info:
-            return ["Module Information:\nNo valid modules found\n"]
+            return ["Module Information:\nNo valid module found\n"]
         
         module_info.sort(key=lambda x: x[0])
         module_info = ["Module Information:\n"] + [info for _, info in module_info]
@@ -104,7 +103,7 @@ async def ana_net_info(board) -> str:
                 net_info.append((net_code_i, net_info_i))
 
         if not net_info:
-            return ["Net Information:\nNo valid nets found\n"]
+            return ["Net Information:\nNo valid net found\n"]
     
         net_info.sort(key=lambda x: x[0])
         net_info = ["Net Information:\n"] + [info for _, info in net_info]
@@ -134,7 +133,7 @@ async def ana_track_info(board: pcbnew.BOARD) -> str:
                 track_info.append((net_i, track_info_i))
 
         if not track_info:
-            return ["Track Information:\nNo valid tracks found\n"]
+            return ["Track Information:\nNo valid track found\n"]
 
         track_info.sort(key=lambda x: (x[0]))
         track_info = ["Track Information:\n"] + [info for _, info in track_info]
@@ -160,7 +159,7 @@ async def ana_via_info(board: pcbnew.BOARD) -> str:
                 via_info.append((net_i, via_info_i))
 
         if not via_info:
-            return ["Via Information:\nNo valid vias found\n"]
+            return ["Via Information:\nNo valid via found\n"]
 
         via_info.sort(key=lambda x: (x[0]))
         via_info = ["Via Information:\n"] + [info for _, info in via_info]
@@ -173,11 +172,14 @@ async def ana_via_info(board: pcbnew.BOARD) -> str:
         return [f"Error: Failed to get via info - {str(e)}\n"]
 
 
-async def save_pcb_image(file_path: str, board: pcbnew.BOARD) -> str:
+async def save_pcb_image(file_path: str) -> str:
     try:
+        board = pcbnew.LoadBoard(file_path)
+        if not board:
+            return f"Error: Could not load PCB from {file_path}"
         bounding_box = board.ComputeBoundingBox()
         if not bounding_box:
-            return "Error: Could not compute bounding box"
+            return "Error: Could not compute bounding box from board"
         
         bbox_x = pcbnew.ToMM(bounding_box.GetX())
         bbox_y = pcbnew.ToMM(bounding_box.GetY())

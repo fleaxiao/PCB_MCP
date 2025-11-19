@@ -1,9 +1,10 @@
 import pcbnew
 
+from typing import Optional
 from pcb_utility import *
 
 
-async def check_onboard_violations(board: pcbnew.BOARD) -> list[str]:
+async def check_board_onboard_violations(board: pcbnew.BOARD) -> list[str]:
     """
     Check if any modules or labeling areas are out of the board boundaries.
     """
@@ -43,7 +44,7 @@ async def check_onboard_violations(board: pcbnew.BOARD) -> list[str]:
         return [f"Error: Failed to check on-board violations - {str(e)}\n"]
 
 
-async def check_clearance_violations(board: pcbnew.BOARD, min_clearance: float) -> list[str]:
+async def check_board_clearance_violations(board: pcbnew.BOARD, min_clearance: float) -> list[str]:
     """
     Check if any modules are put too close so that they violate the clearance rules.
     """
@@ -96,35 +97,125 @@ async def calculate_power_density(board):
     board_size_y = pcbnew.ToMM(board_size.y)
     board_area = board_size_x * board_size_y
 
-    for item in list(board.GetDrawings()):
-        if isinstance(item, pcbnew.PCB_SHAPE) and item.GetLayer() == pcbnew.Edge_Cuts:
-            board.Delete(item)
-
-    effect_size = board.ComputeBoundingBox().GetSize()
-    effect_size_x = pcbnew.ToMM(effect_size.x)
-    effect_size_y = pcbnew.ToMM(effect_size.y)
-    effect_area = effect_size_x * effect_size_y
-
-    footprint_ratio = (footprint_arae / effect_area) * 100 if effect_area > 0 else 0
-    if footprint_ratio < 40:
-        footprint_info = "Warning: modules are placed too loosely, please adjust the model close to each other!"
+    power_density = (footprint_arae / board_area) * 100 if board_area > 0 else 0
+    if power_density < 40:
+        power_density_info = "Warning: modules are placed too loosely, please adjust the model close to each other!"
     else:
-        footprint_info = "The modules are placed appropriately."
+        power_density_info = "The modules are placed appropriately."
 
-    effect_ratio = (effect_area / board_area) * 100 if board_area > 0 else 0
-    effect_ratio_x = (effect_size_x / board_size_x) * 100 if board_size_x > 0 else 0
-    effect_ratio_y = (effect_size_y / board_size_y) * 100 if board_size_y > 0 else 0
-    if effect_ratio < 40:
-        effect_info = "Warning: significant unused board area detected!"
-        if effect_ratio_x < 60:
-            effect_info += f" Please optimize the width usage: {effect_ratio_x:.2f}%"
-        if effect_ratio_y < 60:
-            effect_info += f" Please optimize the height usage: {effect_ratio_y:.2f}%"
-    else:
-        effect_info = "The board area is utilized effectively."
+    msg = f"""Footprint area: {footprint_arae:.2f} mm², Board area: {board_area:.2f} mm². Power density: {power_density:.2f}%. {power_density_info}"""
 
-    msg = f"""Footprint area: {footprint_arae:.2f} mm². Footprint area ratio: {footprint_ratio:.2f}% (footprint area / effective area). {footprint_info}
-Effective area: {effect_area:.2f} mm². Effective area ratio: {effect_ratio:.2f}%  (effective area / board area). {effect_info}
-Board area: {board_area:.2f} mm², size: {board_size_x:.2f} mm x {board_size_y:.2f} mm."""
+    return msg
+
+
+async def check_module_clearance(board: pcbnew.BOARD, mod1: pcbnew.FOOTPRINT, min_clearance: Optional[float] = None) -> list[str]:
+    
+    modules = list(board.GetFootprints())
+    bbox1 = await get_footprint_courtyard(mod1)
+    expanded_bbox1 = pcbnew.BOX2I(bbox1.GetPosition(), bbox1.GetSize())
+    expanded_bbox1.Inflate(pcbnew.FromMM(min_clearance))
+
+    overlapped_modules = []
+    for mod2 in modules:
+        if mod2.GetReference() == mod1.GetReference():
+            continue
+        bbox2 = await get_footprint_courtyard(mod2)
+        ref2 = mod2.GetReference()
+
+        if expanded_bbox1.Intersects(bbox2):
+            overlapped_modules.append(ref2)
+
+    return overlapped_modules
+
+
+async def check_pad2pad_connection(board: pcbnew.BOARD, mod1: pcbnew.FOOTPRINT) -> str:
+    module_pos_x, module_pos_y = pcbnew.ToMM(mod1.GetPosition())
+
+    distance_info = ""
+    alignment = []
+    segments = []
+    module_connections = {}
+    
+    for pad in mod1.Pads():
+        net_name = pad.GetNetname()
+        if net_name != "" and net_name != "GND":
+            pad_pos_x, pad_pos_y = pcbnew.ToMM(pad.GetPosition())
+            net = board.FindNet(net_name)
+            net_code = net.GetNetCode()
+            for module_i in board.GetFootprints():
+                if module_i.GetReference() != mod1.GetReference() and module_i.IsLocked() == False:
+                    module_i_ref = module_i.GetReference()
+
+                    for pad_i in module_i.Pads():
+                        if pad_i.GetNetCode() == net_code:
+                            module_i_pos_x, module_i_pos_y = pcbnew.ToMM(module_i.GetPosition())
+                            module2module_distance = ((module_pos_x - module_i_pos_x) ** 2 + (module_pos_y - module_i_pos_y) ** 2) ** 0.5
+
+                            if module_i_ref not in module_connections:
+                                module_connections[module_i_ref] = {
+                                    'distance': module2module_distance,
+                                    'connections': []
+                                }
+                            
+                            pad_i_pos_x, pad_i_pos_y = pcbnew.ToMM(pad_i.GetPosition())
+                            pad2pad_distance = ((pad_pos_x - pad_i_pos_x) ** 2 + (pad_pos_y - pad_i_pos_y) ** 2) ** 0.5
+
+                            pad_num = pad.GetNumber()
+                            pad_i_num = pad_i.GetNumber()
+                            
+                            module_connections[module_i_ref]['connections'].append(
+                                f"the pad-to-pad distance between pad {pad_num} of {mod1.GetReference()} and pad {pad_i_num} of {module_i_ref} in net {net_name} is {pad2pad_distance:.2f} mm"
+                            )
+                            if pad2pad_distance > module2module_distance:
+                                alignment.append((pad_num, mod1.GetReference(), pad_i_num, module_i_ref, net_name))
+
+                            segments.append((pad_pos_x, pad_pos_y, pad_i_pos_x, pad_i_pos_y, net_name))
+    
+    for idx, (module_ref, data) in enumerate(module_connections.items(), start=1):
+        distance_info += f"Connection {idx}: {mod1.GetReference()} is connected to {module_ref}, "
+        distance_info += f"the module-to-module distance is {data['distance']:.2f} mm, "
+        distance_info += f"{', '.join(data['connections'])}" + ". "
+
+    intersect = await check_segments_intersect(segments)
+
+    return alignment, intersect, distance_info
+
+
+async def check_module_statue(file_path: str, board: pcbnew.BOARD, module_ref: str, pos_x: Optional[float] = None, pos_y: Optional[float] = None, angle: Optional[float] = None, min_clearance: Optional[float] = None) -> str:
+
+    msg = ""
+    min_clearance = min_clearance if min_clearance is not None else 0.2
+    
+    mod1 = board.FindFootprintByReference(module_ref)
+
+    for angle in [0, 90, 180, 270]:
+        mod1.SetOrientationDegrees(angle)
+        
+        overlapped_modules = await check_module_clearance(board, mod1, min_clearance)
+        alignment, intersect, distance_info = await check_pad2pad_connection(board, mod1)
+
+        if overlapped_modules:
+            msg += f"ERROR: when the angle of {module_ref} is {angle} degrees, {mod1.GetReference()} overlap with {', '.join(overlapped_modules)}.\n"
+        else :
+            if alignment:
+                msg += f"WARNING: when the angle of {module_ref} is {angle} degrees, {mod1.GetReference()} meets the clearance requirements, but the possible pad-to-pad misalignments should be checked: "
+                for pad1, mod1_ref, pad2, mod2_ref, net in alignment:
+                    alignment_msgs = [f"the pad {pad1} of {mod1_ref} and pad {pad2} of {mod2_ref} in net {net}" for pad1, mod1_ref, pad2, mod2_ref, net in alignment]
+                msg += ', '.join(alignment_msgs) + ". "
+                msg += distance_info + "\n"
+                continue
+            if intersect:
+                msg += f"WARNING: when the angle of {module_ref} is {angle} degrees, {mod1.GetReference()} meets the clearance requirements, but there are pin-to-pin connections intersections: "
+                for seg1_idx, seg2_idx, net1, net2 in intersect:
+                    intersection_msg = f"the net {net1} and net {net2}"
+                    msg += ', '.join([intersection_msg]) + ". "
+                    msg += distance_info + "\n"
+                continue
+            else:
+                msg += f"INFO: when the angle of {module_ref} is {angle} degrees, {mod1.GetReference()} meets all clearance requirements, and there is no pin-to-pin misalignment or intersection. {distance_info}\n"
+
+
+    for seg1_idx, seg2_idx, net1, net2 in intersect:
+        msg += f"Warning: There are pin-to-pin connections intersecting for net {net1} and net {net2} in module {module_ref}, please consider adjusting the position or angle of the module\n"
 
     return msg
