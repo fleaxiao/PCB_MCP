@@ -1,19 +1,100 @@
 import os
+import re
+import requests
 import pcbnew
 import xml.etree.ElementTree as ET
 
 from logging import root
 from typing import Optional
+from bs4 import BeautifulSoup
+from pcb_utility import *
 from pcb_utility import *
 
 
-async def ana_board_info(board: pcbnew.BOARD) -> str:
+async def spider_datasheet_info(url: str):
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        infos = []
+        links = soup.find_all('a', attrs={
+            'class': 'no-children',
+            'data-navtitle': re.compile(r'(description|pin|layout guidelines)', re.IGNORECASE)
+        })
+        
+        for link in links:
+            href = link.get('href', '')
+            section_title = link.get('data-navtitle', '')
+
+            full_url = url if not href.startswith('http') else href
+            if not href.startswith('http'):
+                full_url = f"https:{href}" if href.startswith('/') else f"{url.rstrip('/')}/{href}"
+
+            detail_response = requests.get(full_url, headers=headers, timeout=10)
+            detail_response.raise_for_status()
+            detail_soup = BeautifulSoup(detail_response.text, 'html.parser')
+            content_div = detail_soup.find('div', {'class': 'subsection'})
+
+            if content_div:
+                all_subsections = detail_soup.find_all('div', {'class': 'subsection'})
+                target_div = None
+                
+                for subsection in all_subsections:
+                    header = subsection.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+                    
+                    if header and section_title.lower() in header.get_text().lower():
+                        target_div = subsection
+                        break
+                
+                if target_div:
+                    paragraphs_data = []
+                    lists_data = []
+                    tables_data = []
+                    for p in target_div.find_all('p'):
+                        text_info = p.get_text(separator=' ', strip=True)
+                        text_info = re.sub(r'\s+', ' ', text_info)
+                        text_info = text_info.strip()
+                        if text_info:
+                            paragraphs_data.append(text_info)
+                    for li in target_div.find_all('li'):
+                        text_info = li.get_text(separator=' ', strip=True)
+                        text_info = re.sub(r'\s+', ' ', text_info)
+                        text_info = text_info.strip()
+                        if text_info:
+                            lists_data.append(text_info)
+                    for table in content_div.find_all('table'):
+                        table_info = await extract_table(table)
+                        if table_info:
+                            tables_data.append(table_info)
+                    info = {
+                        'section': section_title,
+                        'paragraphs': paragraphs_data,
+                        'lists': lists_data,
+                        'tables': tables_data
+                    }
+                    infos.append(info)
+
+        return infos
+
+    except Exception as e:
+        print(f"Error reading page: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+async def ana_board_env(board: pcbnew.BOARD) -> str:
     try:
         board_courtyard = await get_board_courtyard(board)
         if not board_courtyard:
             courtyard_info = "The board courtyard has not been defined."
         else:
-            courtyard_info = f"Size: {pcbnew.ToMM(board_courtyard.GetWidth()):.2f} mm x {pcbnew.ToMM(board_courtyard.GetHeight()):.2f} mm"
+            courtyard_info = f"Center: ({pcbnew.ToMM(board_courtyard.GetCenter().x):.2f} mm, {pcbnew.ToMM(board_courtyard.GetCenter().y):.2f} mm), Size: {pcbnew.ToMM(board_courtyard.GetWidth()):.2f} mm x {pcbnew.ToMM(board_courtyard.GetHeight()):.2f} mm"
 
         bounding_box = board.ComputeBoundingBox()
         if not bounding_box:
@@ -23,18 +104,9 @@ async def ana_board_info(board: pcbnew.BOARD) -> str:
         center_x, center_y = pcbnew.ToMM(BoundingBox_center.x), pcbnew.ToMM(BoundingBox_center.y)
         width, height = pcbnew.ToMM(BoundingBox_size.x), pcbnew.ToMM(BoundingBox_size.y)
         
-        num_modules = len(board.GetFootprints())
-        num_nets = len(board.GetNetsByName())
-        num_tracks = len([track for track in board.GetTracks() if isinstance(track, pcbnew.PCB_TRACK) and not isinstance(track, pcbnew.PCB_VIA)])
-        num_vias = len([via for via in board.GetTracks() if isinstance(via, pcbnew.PCB_VIA)])
-
         board_info = f"""Board Information:
 Board Courtyard - {courtyard_info}
-Bounding Box - Center: ({center_x:.2f} mm, {center_y:.2f} mm), Size: {width:.2f} mm x {height:.2f} mm
-Module - Number: {num_modules}
-Net - Number: {num_nets}
-Track - Number: {num_tracks}
-Via - Number: {num_vias}
+Module Bounding Box - Center: ({center_x:.2f} mm, {center_y:.2f} mm), Size: {width:.2f} mm x {height:.2f} mm
 """
         return board_info
     
@@ -44,15 +116,13 @@ Via - Number: {num_vias}
         return f"Error: Failed to get board info - {str(e)}"
 
 
-async def ana_module_info(board: pcbnew.BOARD) -> str:
+async def ana_module_env(board: pcbnew.BOARD) -> str:
     try:
         module_info = []
         footprints = board.GetFootprints()
         
         for module in footprints:
             module_ref_i = module.GetReference()
-            module_pos_x_i, module_pos_y_i = pcbnew.ToMM(module.GetPosition())
-            module_angle_i = module.GetOrientationDegrees()
 
             footprint_name_i = module.GetFPID().GetLibItemName()
             footprint_w_i, footprint_h_i = await get_footprint_size(module)
@@ -83,7 +153,7 @@ async def ana_module_info(board: pcbnew.BOARD) -> str:
         return [f"Error: Failed to get module info - {str(e)}\n"]
 
 
-async def ana_net_info(board) -> str:
+async def ana_net_env(board) -> str:
     try:
         net_info = []
         for net in board.GetNetsByName().values():
@@ -116,7 +186,7 @@ async def ana_net_info(board) -> str:
         return [f"Error: Failed to get net info - {str(e)}\n"]
 
 
-async def ana_track_info(board: pcbnew.BOARD) -> str:
+async def ana_track_env(board: pcbnew.BOARD) -> str:
     try:
         track_info = []
         for track in board.GetTracks():
@@ -146,7 +216,7 @@ async def ana_track_info(board: pcbnew.BOARD) -> str:
         return [f"Error: Failed to get track info - {str(e)}\n"]
 
 
-async def ana_via_info(board: pcbnew.BOARD) -> str:
+async def ana_via_env(board: pcbnew.BOARD) -> str:
     try:
         via_info = []
         for via in board.GetTracks():
@@ -172,15 +242,11 @@ async def ana_via_info(board: pcbnew.BOARD) -> str:
         return [f"Error: Failed to get via info - {str(e)}\n"]
 
 
-async def save_pcb_image(file_path: str) -> str:
+async def export_pcb_image(file_path: str) -> str:
     try:
         board = pcbnew.LoadBoard(file_path)
-        if not board:
-            return f"Error: Could not load PCB from {file_path}"
         bounding_box = board.ComputeBoundingBox()
-        if not bounding_box:
-            return "Error: Could not compute bounding box from board"
-        
+
         bbox_x = pcbnew.ToMM(bounding_box.GetX())
         bbox_y = pcbnew.ToMM(bounding_box.GetY())
         bbox_w = pcbnew.ToMM(bounding_box.GetWidth())
@@ -189,56 +255,42 @@ async def save_pcb_image(file_path: str) -> str:
         base_name = file_path.rsplit('.', 1)[0] + '.svg'
         output_dir = os.path.dirname(base_name)
 
-        try:
-            plot_controller = pcbnew.PLOT_CONTROLLER(board)
-            plot_options = plot_controller.GetPlotOptions()
-            plot_options.SetOutputDirectory(output_dir)
-            plot_options.SetPlotFrameRef(False)
-            plot_options.SetPlotValue(True)
-            plot_options.SetPlotReference(True)
-            plot_options.SetPlotMode(True)
-            plot_options.SetColorSettings(pcbnew.GetSettingsManager().GetColorSettings("KiCad Default"))
+        plot_controller = pcbnew.PLOT_CONTROLLER(board)
+        plot_options = plot_controller.GetPlotOptions()
+        plot_options.SetOutputDirectory(output_dir)
+        plot_options.SetPlotFrameRef(False)
+        plot_options.SetPlotValue(True)
+        plot_options.SetPlotReference(True)
+        plot_options.SetPlotMode(True)
+        plot_options.SetColorSettings(pcbnew.GetSettingsManager().GetColorSettings("KiCad Default"))
 
-            layers_to_plot = [pcbnew.F_Cu, pcbnew.F_SilkS, pcbnew.F_Mask, pcbnew.Edge_Cuts]
-            plot_controller.OpenPlotfile("", pcbnew.PLOT_FORMAT_SVG, "")
-            
-            for layer in layers_to_plot:
-                try:
-                    plot_controller.SetLayer(layer)
-                    plot_controller.SetColorMode(True)
-                    plot_controller.PlotLayer()
-                except Exception as e:
-                    print(f"Warning: Error plotting layer {layer}: {str(e)}")
-                    continue
-            
-            plot_controller.ClosePlot()
-        except Exception as e:
-            return f"Error: Failed to plot PCB: {str(e)}"
+        layers_to_plot = [pcbnew.F_Cu, pcbnew.F_SilkS, pcbnew.F_Mask, pcbnew.Edge_Cuts]
+        plot_controller.OpenPlotfile("", pcbnew.PLOT_FORMAT_SVG, "")
+        
+        for layer in layers_to_plot:
+            try:
+                plot_controller.SetLayer(layer)
+                plot_controller.SetColorMode(True)
+                plot_controller.PlotLayer()
+            except Exception as e:
+                print(f"Warning: Error plotting layer {layer}: {str(e)}")
+                continue
+        
+        plot_controller.ClosePlot()
 
-        if not os.path.exists(base_name):
-            return f"Error: SVG file was not generated: {base_name}"
+        tree = ET.parse(base_name)
+        root = tree.getroot()
+        root.set('viewBox', f"{bbox_x} {bbox_y} {bbox_w} {bbox_h}")
+        root.set('width', f"{bbox_w}mm")
+        root.set('height', f"{bbox_h}mm")
+        tree.write(base_name, encoding='utf-8', xml_declaration=True)
 
-        try:
-            tree = ET.parse(base_name)
-            root = tree.getroot()
-            root.set('viewBox', f"{bbox_x} {bbox_y} {bbox_w} {bbox_h}")
-            root.set('width', f"{bbox_w}mm")
-            root.set('height', f"{bbox_h}mm")
-            tree.write(base_name, encoding='utf-8', xml_declaration=True)
-        except ET.ParseError as e:
-            return f"Error: Failed to parse SVG file: {str(e)}"
-        except Exception as e:
-            return f"Error: Failed to modify SVG file: {str(e)}"
+        completed_name = f"{file_path.rsplit('.', 1)[0]}_{bbox_w:.2f}x{bbox_h:.2f}.svg"
+        if os.path.exists(completed_name):
+            os.remove(completed_name)
+        os.rename(base_name, completed_name)
 
-        try:
-            completed_file = f"{file_path.rsplit('.', 1)[0]}_{bbox_w:.2f}x{bbox_h:.2f}.svg"
-            if os.path.exists(completed_file):
-                os.remove(completed_file)
-            os.rename(base_name, completed_file)
-        except OSError as e:
-            return f"Error: Failed to rename file: {str(e)}"
-
-        return f"Success: Generating PCB SVG image: {completed_file}"
+        return f"Success: Generating PCB SVG image: {completed_name}\n"
     
     except AttributeError as e:
         return f"Error: Invalid board object or missing method - {str(e)}"

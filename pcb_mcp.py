@@ -1,11 +1,9 @@
 import re
-import json
 import asyncio
 import pcbnew
 
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
-from pcb_resource import *
 from pcb_tool_get import *
 from pcb_tool_set import *
 from pcb_tool_check import *
@@ -14,9 +12,9 @@ from pcb_tool_check import *
 mcp = FastMCP("PCB", log_level="ERROR")
 
 @mcp.tool()
-async def get_dataset_info(file_path: str) -> str:
+async def get_dataset_resource(file_path: str) -> str:
     """
-    Scrape the dataset webpage to extract textual and tabular information about IC description, pin function and layout guidance.
+    Scrape the IC dataset webpage to extract textual and tabular information about the general description, the pin function and the layout guidance.
 
     Args:
         file_path (str): Path to the PCB file.
@@ -27,7 +25,7 @@ async def get_dataset_info(file_path: str) -> str:
         print(f"Error: Could not load PCB from {file_path}")
         return "Error: Could not load PCB"
     
-    msg = []
+    msg = ""
     for module in board.GetFootprints():
         ref = module.GetReference()
         if ref.startswith('U'):
@@ -35,18 +33,17 @@ async def get_dataset_info(file_path: str) -> str:
             ic_module = re.sub(r'[A-Za-z]+$', '', value)
             ic_url = f"https://www.ti.com/document-viewer/{ic_module}/datasheet"
             datasheet_info = await spider_datasheet_info(ic_url)
-            msg.append({"reference": ref, "ic_module": ic_module, "datasheet_info": datasheet_info})
-
+            msg += f"Reference: {ref}, IC Module: {ic_module}, Datasheet Info: {datasheet_info}\n"
     if not msg:
-        return ["No modules with reference starting with 'U' found"]
-    print(json.dumps(msg, indent=2, ensure_ascii=False))
+        return "No modules with reference starting with 'U' found"
 
     return msg
 
+
 @mcp.tool()
-async def get_pcb_info(file_path: str) -> str:
+async def get_pcb_env(file_path: str) -> str:
     """
-    Analyze basic information of board, module, track and via.
+    Analyze the basic pre-defined pcb environment of board, module, track and via.
     
     Args:
         file_path (str): Path to the PCB file.
@@ -57,7 +54,7 @@ async def get_pcb_info(file_path: str) -> str:
         print(f"Error: Could not load PCB from {file_path}")
         return "Error: Could not load PCB"
 
-    info_functions = [ana_board_info, ana_module_info, ana_net_info, ana_track_info, ana_via_info]
+    info_functions = [ana_board_env, ana_module_env, ana_net_env, ana_track_env, ana_via_env]
     info_results = []
     for func in info_functions:
         try:
@@ -68,77 +65,44 @@ async def get_pcb_info(file_path: str) -> str:
             return error_msg
     board_info, module_info, net_info, track_info, via_info = info_results
 
-    msg = f"{'='*60}\n" + board_info + f"{'='*60}\n" + "".join(module_info) + f"{'='*60}\n" + "".join(net_info) + f"{'='*60}\n" + "".join(track_info) + f"{'='*60}\n" + "".join(via_info) + f"{'='*60}\n"
+    msg = f"{board_info}" + f"{'='*60}\n" + "".join(module_info) + f"{'='*60}\n" + "".join(net_info) + f"{'='*60}\n" + "".join(track_info) + f"{'='*60}\n" + "".join(via_info)
     print(msg)
-
     return msg
 
-@mcp.tool()
-async def get_pcb_image(file_path: str) -> str:
-    """
-    Export svg images of the PCB file.
-    
-    Args:
-        file_path (str): Path to the PCB file.
-    """
-
-    msg = await save_pcb_image(file_path)
-    print(msg)
-
-    return msg
 
 @mcp.tool()
-async def init_pcb(file_path: str) -> str:
+async def init_layout(file_path: str) -> str:
     """
-    Initialize the modules to ensure the center of the courtyard is at the origin of each footprint. This is a prerequisite for subsequent operations.
+    Initialize the modules to ensure the center of the courtyard is at the origin of each footprint. This is a prerequisite for subsequent layout operations.
     
     Args:
         file_path (str): Path to the PCB file.
     """
 
     msg = await init_module(file_path)
-    print(msg)
 
     return msg
 
-@mcp.tool()
-async def label_area(file_path: str, func: str, center_x: float, center_y: float, size_x: float, size_y: float) -> str:
-    """
-    Label a rectangular area by its function on a specific user layer.
-
-    Args:
-        path (str): Path to the PCB file.
-        func (str): Function name of the area to label.
-        center_x (float): Center X of the area in mm.
-        center_y (float): Center Y of the area in mm.
-        size_x (float): Width of the area in mm.
-        size_y (float): Height of the area in mm.
-    """
-
-    # msg = await label_shape_by_layer(file_path, func, center_x, center_y, size_x, size_y)
-    msg = await label_zone_by_name(file_path, func, center_x, center_y, size_x, size_y)
-    print(msg)
-
-    return msg
 
 @mcp.tool()
-async def adjust_module_position(file_path: str, module_ref: str, pos_x: Optional[float] = None, pos_y: Optional[float] = None) -> str:
+async def set_module_position_check_rotations(file_path: str, module_ref: str, pos_x: Optional[float] = None, pos_y: Optional[float] = None) -> str:
     """
-    Adjust the position and angle of one module.
+    Adjust roughly the position of the referred module, and evaluate the module status in four different angles.
 
     Args:
-        path (str): Path to the PCB file.
+        file_path (str): Path to the PCB file.
         module_ref (str): Reference of the module to modify.
-        pos_x (Optional[float]): New X position in mm. If None, keeps current position.
-        pos_y (Optional[float]): New Y position in mm. If None, keeps current position.
+        pos_x (Optional[float]): Horizontal position of the module to set in mm. If None, keeps current position.
+        pos_y (Optional[float]): Vertical position of the module to set in mm. If None, keeps current position.
     """
 
     board = pcbnew.LoadBoard(file_path)
+    
     if not board:
         print(f"Error: Could not load PCB from {file_path}")
         return "Error: Could not load PCB"
 
-    msg_functions = [set_module_position, check_module_statue]
+    msg_functions = [set_module_position, check_module_status_by_angles]
     msg = ""
     for func in msg_functions:
         try:
@@ -148,18 +112,18 @@ async def adjust_module_position(file_path: str, module_ref: str, pos_x: Optiona
             error_msg = f"Error: {str(e)}\n"
             return error_msg
     print(msg)
-
     return msg
+
 
 @mcp.tool()
 async def adjust_module_angle(file_path: str, module_ref: str, angle: Optional[float] = None) -> str:
     """
-    Adjust the position and angle of one module.
+    Adjust the angle of the referred module according to the module status feedback of four different angles.
 
     Args:
         path (str): Path to the PCB file.
         module_ref (str): Reference of the module to modify.
-        angle (Optional[float]): New angle in degrees. If None, keeps current angle.
+        angle (Optional[float]): Angle of the module to set in degrees. If None, keeps current angle.
     """
 
     board = pcbnew.LoadBoard(file_path)
@@ -176,31 +140,49 @@ async def adjust_module_angle(file_path: str, module_ref: str, angle: Optional[f
         except Exception as e:
             error_msg = f"Error: {str(e)}\n"
             return error_msg
-    print(msg)
 
     return msg
 
-# @mcp.tool()
-# async def adjust_net_track(file_path: str, net: str, start_x: list[float], start_y: list[float], end_x: list[float], end_y: list[float], width: list[float]) -> str:
-#     """
-#     Adjust the position and width of tracks for a net.
-#     """
-
-#     board = pcbnew.LoadBoard(file_path)
-
-#     if not board:
-#         print(f"Error: Could not load board from {file_path}")
-#         return "Error: Could not load board"
-
-#     msg = await set_net_track(file_path, board, net, start_x, start_y, end_x, end_y, width)
-#     print(msg)
-
-#     return msg
 
 @mcp.tool()
-async def set_board(file_path: str) -> str:
+async def adjust_module_position(file_path: str, module_ref: str, re_pos_x: Optional[float] = None, re_pos_y: Optional[float] = None) -> str:
     """
-    When finishing the module placement, adjust the board size in the Edge.Cuts layer according to the current effective area. Add copper zone for GND net on B.Cu layer
+    Adjust precisely the position of the referred module given the relative position adjustments.
+
+    Args:
+        path (str): Path to the PCB file.
+        module_ref (str): Reference of the module to modify.
+        re_pos_x (Optional[float]): Relative horizontal position adjustment of the module to set in mm. If None, keeps current position.
+        re_pos_y (Optional[float]): Relative vertical position adjustment of the module to set in mm. If None, keeps current position.
+    """
+
+    board = pcbnew.LoadBoard(file_path)
+    if not board:
+        print(f"Error: Could not load PCB from {file_path}")
+        return "Error: Could not load PCB"
+    module = board.FindFootprintByReference(module_ref)
+    current_pos_x = pcbnew.ToMM(module.GetPosition())[0]
+    current_pos_y = pcbnew.ToMM(module.GetPosition())[1]
+    pos_x = current_pos_x + re_pos_x if re_pos_x is not None else current_pos_x
+    pos_y = current_pos_y + re_pos_y if re_pos_y is not None else current_pos_y
+
+    msg_functions = [set_module_position]
+    msg = ""
+    for func in msg_functions:
+        try:
+            result = await func(file_path, board, module_ref, pos_x, pos_y)
+            msg += result
+        except Exception as e:
+            error_msg = f"Error: {str(e)}\n"
+            return error_msg
+
+    return msg
+
+
+@mcp.tool()
+async def set_board_courtyard(file_path: str) -> str:
+    """
+    Adjust the board size in the Edge.Cuts layer according to the current effective area, and add the copper zone for GND net on B.Cu layer, once the module placement is finished.
     
     Args:
         path (str): Path to the PCB file.
@@ -208,14 +190,14 @@ async def set_board(file_path: str) -> str:
 
     msg =  await set_board_cut(file_path)
     msg += "\n" + await set_board_GND(file_path)
-    print(msg)
 
     return msg
+
 
 @mcp.tool()
 async def check_power_density(file_path: str) -> str:
     """
-    check the power density of the PCB board by calculating the footprint area ratio and the effective area ratio.
+    Check the power density of the PCB board by calculating the footprint area ratio and the effective area ratio.
     
     Args:
         file_path (str): Path to the PCB file.
@@ -228,9 +210,9 @@ async def check_power_density(file_path: str) -> str:
         return "Error: Could not load board"
     
     msg = await calculate_power_density(board)
-    print(msg)
 
     return msg
+
 
 @mcp.tool()
 async def check_design_rule(file_path: str, min_clearance: Optional[float] = None) -> str:
@@ -301,14 +283,14 @@ if __name__ == "__main__":
     pos_x = 55.0
     pos_y = 40
     angle = 90
-    # asyncio.run(adjust_module_position(file_path, module_ref))
+    asyncio.run(set_module_position_check_rotations(file_path, module_ref))
 
     # center_x = 75.0
     # center_y = 50.0
     # size_x = 20.0
     # size_y = 20.0
 
-    asyncio.run(get_pcb_info(file_path))
+    # asyncio.run(get_pcb_env(file_path))
     # asyncio.run(init_pcb(file_path))
     # asyncio.run(label_area(file_path, "myVOUT", center_x, center_y, size_x, size_y))
     # asyncio.run(check_design_rule(file_path))

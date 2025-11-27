@@ -181,7 +181,47 @@ async def check_pad2pad_connection(board: pcbnew.BOARD, mod1: pcbnew.FOOTPRINT) 
     return alignment, intersect, distance_info
 
 
-async def check_module_statue(file_path: str, board: pcbnew.BOARD, module_ref: str, pos_x: Optional[float] = None, pos_y: Optional[float] = None, angle: Optional[float] = None, min_clearance: Optional[float] = None) -> str:
+async def check_module_status_by_angles(file_path: str, board: pcbnew.BOARD, module_ref: str, pos_x: Optional[float] = None, pos_y: Optional[float] = None, angle: Optional[float] = None, min_clearance: Optional[float] = None) -> str:
+
+    msg = ""
+    min_clearance = min_clearance if min_clearance is not None else 0.2
+    
+    mod1 = board.FindFootprintByReference(module_ref)
+
+    for angle in [0, 90, 180, 270]:
+        mod1.SetOrientationDegrees(angle)
+        
+        overlapped_modules = await check_module_clearance(board, mod1, min_clearance)
+        alignment, intersect, distance_info = await check_pad2pad_connection(board, mod1)
+
+        if overlapped_modules:
+            msg += f"ERROR: when the angle of {module_ref} is {angle} degrees, {mod1.GetReference()} overlap with {', '.join(overlapped_modules)}.\n"
+        else :
+            if alignment:
+                msg += f"WARNING: when the angle of {module_ref} is {angle} degrees, {mod1.GetReference()} meets the clearance requirements, but the possible pad-to-pad misalignments should be checked: "
+                for pad1, mod1_ref, pad2, mod2_ref, net in alignment:
+                    alignment_msgs = [f"the pad {pad1} of {mod1_ref} and pad {pad2} of {mod2_ref} in net {net}" for pad1, mod1_ref, pad2, mod2_ref, net in alignment]
+                msg += ', '.join(alignment_msgs) + ". "
+                msg += distance_info + "\n"
+                continue
+            if intersect:
+                msg += f"WARNING: when the angle of {module_ref} is {angle} degrees, {mod1.GetReference()} meets the clearance requirements, but there are pin-to-pin connections intersections: "
+                for seg1_idx, seg2_idx, net1, net2 in intersect:
+                    intersection_msg = f"the net {net1} and net {net2}"
+                    msg += ', '.join([intersection_msg]) + ". "
+                    msg += distance_info + "\n"
+                continue
+            else:
+                msg += f"INFO: when the angle of {module_ref} is {angle} degrees, {mod1.GetReference()} meets all clearance requirements, and there is no pin-to-pin misalignment or intersection. {distance_info}\n"
+
+
+    for seg1_idx, seg2_idx, net1, net2 in intersect:
+        msg += f"Warning: There are pin-to-pin connections intersecting for net {net1} and net {net2} in module {module_ref}, please consider adjusting the position or angle of the module\n"
+
+    return msg
+
+
+async def check_module_status_by_positions(file_path: str, board: pcbnew.BOARD, module_ref: str, pos_x: Optional[float] = None, pos_y: Optional[float] = None, angle: Optional[float] = None, min_clearance: Optional[float] = None) -> str:
 
     msg = ""
     min_clearance = min_clearance if min_clearance is not None else 0.2
